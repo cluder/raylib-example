@@ -1,5 +1,5 @@
 
-override CFLAGS += -Wextra -c -g
+override CFLAGS += -Wall -Wextra -c -g
 
 #SRCS = $(wildcard *.c)
 #OBJS = $(SRCS:.c=.o)
