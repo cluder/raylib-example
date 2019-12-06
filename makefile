@@ -17,6 +17,7 @@ raylib_example: raylib_example.o
 
 raylib_example.o: raylib_example.c 
 	gcc $(CFLAGS) raylib_example.c
+	ctags raylib_example.c
 
 clean:
 	rm raylib_example raylib_example.o

@@ -1,8 +1,13 @@
+
+#include "stdio.h"
+#include "stdlib.h"
+#include "assert.h"
+
 #include "raylib.h"
 #include "rlgl.h"
-#include "stdio.h"
 
 typedef struct _Player {
+	Texture currentTexture;
 	Texture tex;
 	Texture texFlipped;
 	float x; float y;
@@ -13,7 +18,9 @@ typedef struct _Player {
 } Player;
 
 typedef struct _Enemy {
-	int health;
+	float health;
+	float maxHealth;
+	Texture currentTexture;
 	Texture texture;
 	Texture textureFlipped;
 	float x; float y;
@@ -39,6 +46,7 @@ void drawBullets();
 void drawBG();
 void drawGame();
 void drawEnemies();
+void drawLevelInfo();
 
 void handleInput();
 void handlePlayerInput();
@@ -51,12 +59,16 @@ void updateEnemies(float tpf);
 void detectCollision();
 bool isCollidingBE(Bullet b, Enemy e);
 bool isCollidingPE(Player p, Enemy e);
+bool checkPixelCollisionPE(Rectangle r, Player p, Enemy e);
 
 float calcFrameTime();
+Color getEnemyTint(Enemy e);
 
 void gameOver();
 void drawGameOverScreen();
-void handleWin();
+void checkLevelEnd();
+void nextLevel();
+void testLevel();
 
 // textures
 Texture getOrLoadGhostTex(bool flipped);
@@ -79,10 +91,12 @@ const float bulletSpeed = 300;
 const Vector2 bulletSize = (Vector2){2,12};
 
 // enemy
-#define NUM_ENEMIES 21
+#define NUM_ENEMIES 15 
 const int numRows = 3;
 int numEnemiesPerRow = NUM_ENEMIES/numRows;
 Enemy enemies[NUM_ENEMIES];
+
+int currentLevel = 1;
 
 #define TARGET_FPS 30
 
@@ -113,14 +127,9 @@ int main()
 	return 0;
 }
 
+// TODO limit max frame time (stutter / debugging)
 float calcFrameTime() {
 	float tpf = GetFrameTime();
-
-	/*
-	if (tpf > 1.0f/TARGET_FPS) {
-		tpf = 1.0f/TARGET_FPS;
-		fprintf(stderr, "tpf limited:%f 1/30:%f\n", tpf,1.0f/TARGET_FPS);
-	}*/
 
 	return tpf;
 }
@@ -189,13 +198,29 @@ Texture getOrLoadPlayerTex(bool flipped) {
 }
 
 void initEnemies() {
+	const float baseHealth = 3;
+	float healthLevelModifier = 0.4;
+
+	const float baseHSpeed = 100;
+	float hSpeedLevelModifier = 0.4;
+	
+	float health = baseHealth;
+	float hSpeed = baseHSpeed;
+
+	health = baseHealth + (baseHealth * healthLevelModifier * currentLevel);
+	hSpeed = baseHSpeed + (baseHSpeed * hSpeedLevelModifier * currentLevel);
+
+	fprintf(stderr, "Level:%d: health:%f, hspeed:%f\n",
+			currentLevel, health, hSpeed);
+	
 	Texture ghostTex = getOrLoadGhostTex(false);
 	for (int i = 0; i < NUM_ENEMIES; i++) {
 		enemies[i].texture = ghostTex;
 		enemies[i].textureFlipped = getOrLoadGhostTex(true);
-		enemies[i].hSpeed = 100;
+		enemies[i].hSpeed = hSpeed;
 		enemies[i].vSpeed = 0;
-		enemies[i].health = 3;
+		enemies[i].health = health;
+		enemies[i].maxHealth = health;
 	}
 	
 	// init enemy positions
@@ -203,7 +228,7 @@ void initEnemies() {
 	int ySpace = 20;
 	int xOffs = (GetScreenWidth() - numEnemiesPerRow*ghostTex.width 
 					- numEnemiesPerRow*xSpace)/2;
-	int yOffs = 50;
+	int yOffs = 100;
 	for (int row = 0; row < numRows; row++) {
 		for (int col = 0; col < numEnemiesPerRow; col++) {
 			int idx = (row*numEnemiesPerRow)+col;
@@ -213,6 +238,7 @@ void initEnemies() {
 		}
 	}
 }
+
 
 void drawBG() {
 	ClearBackground(RAYWHITE);
@@ -250,6 +276,12 @@ void handlePlayerInput() {
 	if (IsKeyPressed(KEY_X)) {
 		gameOver();
 	}
+	if (IsKeyPressed(KEY_S)) {
+		nextLevel();
+	}
+	if (IsKeyPressed(KEY_T)) {
+		testLevel();
+	}
 }
 
 void updateGame(float tpf) {
@@ -260,7 +292,7 @@ void updateGame(float tpf) {
 	updateBullets(tpf);
 	detectCollision();
 
-	handleWin(); // all enemies dead
+	checkLevelEnd(); // check if all enemies are dead
 }
 
 void detectCollision() {
@@ -273,12 +305,12 @@ void detectCollision() {
 			bool collision = isCollidingBE(bullets[bIdx], enemies[eIdx]);
 			if (collision) {
 				enemies[eIdx].health --;
-				enemies[eIdx].hSpeed *= 1.5f;
-				enemies[eIdx].vSpeed += 15;
+				enemies[eIdx].hSpeed *= 1.05f;
+				enemies[eIdx].vSpeed += 10;
 				if (enemies[eIdx].health <= 0) {
 					enemies[eIdx].isDead = true;
 				}
-				bullets[bIdx].isAlive= false;
+				bullets[bIdx].isAlive = false;
 			}
 		}
 	}
@@ -303,6 +335,9 @@ bool isCollidingBE(Bullet b, Enemy e) {
 	return CheckCollisionPointRec(b.pos, enemyRect);
 }
 
+// check for collision between player and enemy
+// 1. check rectangles for collision
+// 2. check pixel perfect
 bool isCollidingPE(Player p, Enemy e) {
 	Rectangle enemyRect;
 	enemyRect.x = e.x;
@@ -316,7 +351,58 @@ bool isCollidingPE(Player p, Enemy e) {
 	playerRect.width = p.tex.width;
 	playerRect.height= p.tex.height;
 	
-	return CheckCollisionRecs(playerRect, enemyRect);
+	Rectangle colRect = GetCollisionRec(playerRect, enemyRect);
+	if (colRect.width > 0 && colRect.height > 0) {
+		// pixel perfect collision check
+		return checkPixelCollisionPE(colRect, p, e);
+	}
+	return false;
+}
+
+Color getPixelColor(Image img, int imgX, int imgY, int screenX, int screenY)
+{
+	Color *imgData = GetImageData(img);	
+		
+	for (int y = 0; y < img.height; y++) {
+		for (int x = 0; x < img.width; x++) {
+			int imgPixelPosX = imgX + x;
+			int imgPixelPosY = imgY + y;
+			
+			if (imgPixelPosX == screenX && 
+				imgPixelPosY == screenY) {
+				return imgData[y*img.width + x];
+			}
+		}
+	}
+	// return transparent color if pixel is out of range
+	return BLANK;
+}
+
+// check if non-transparent player and enemy pixels overlap
+bool checkPixelCollisionPE(Rectangle rect, Player p, Enemy e)
+{
+	// get player img  TODO
+	Image pImg =  GetTextureData(p.currentTexture);
+
+	// get enemy img
+	Image eImg =  GetTextureData(e.currentTexture);
+
+	// for each pixel in the collision rectangle, 
+	// check if a non-transparent player and enemy pixel exists
+	for (int y = 0; y < rect.height; y++) {
+		for (int x = 0; x < rect.width; x++) {
+			// for the img at loc x/y get the color at screen loc x/y
+			Color playerPixelCol = getPixelColor(pImg, p.x, p.y,
+				rect.x+x, rect.y+y);
+			Color enemyPixelCol = getPixelColor(eImg, e.x, e.y, 
+				rect.x+x, rect.y+y);
+
+			if (playerPixelCol.a != 0 && enemyPixelCol.a != 0) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 void updatePlayer(float tpf) {
@@ -346,6 +432,7 @@ void drawGame() {
 	drawPlayer();
 	drawBullets();
 	drawEnemies();
+	drawLevelInfo();
 
 	if (gameState == GAME_OVER) {
 		drawGameOverScreen();
@@ -354,12 +441,13 @@ void drawGame() {
 
 void drawPlayer() {
 	if (player.isMovingLeft) {
-		DrawTexture (player.texFlipped, player.x, player.y, 
-			GRAY);
+		player.currentTexture = player.texFlipped;
 	} else {
-		DrawTexture (player.tex, player.x, player.y, 
-			GRAY);
+		player.currentTexture = player.tex;
  	}
+
+	DrawTexture (player.currentTexture, player.x, player.y, 
+			GRAY);
 }
 
 void updateEnemies(float tpf) {
@@ -416,28 +504,41 @@ void drawEnemies() {
 		if (enemies[i].isDead) {
 			continue;
 		}
-		Color tint = WHITE;	
-		switch(enemies[i].health) {
-		case 1:
-			tint = RED;
-			break;
-		case 2:
-			tint = PURPLE;
-			break;
-		case 3:
-			// fallthrough
-		default:
-			break;
-		}
+		
+		Color tint = getEnemyTint(enemies[i]);
+
 		if (enemies[i].hSpeed > 0) {
 			// horizontal flip
-			DrawTexture (enemies[i].textureFlipped, 
-				enemies[i].x, enemies[i].y, tint);
+			enemies[i].currentTexture = enemies[i].textureFlipped;
 		} else {
-			DrawTexture (enemies[i].texture, 
-				enemies[i].x, enemies[i].y, tint);
+			enemies[i].currentTexture = enemies[i].texture;
 		}
+		DrawTexture (enemies[i].currentTexture, 
+				enemies[i].x, enemies[i].y, tint);
 	}
+}
+
+void drawLevelInfo() {
+	int fontSize = 30;
+	const char* txt = "Level:%d";
+	const char *levelInfo = TextFormat(txt, currentLevel);
+	int txtLen = MeasureText(levelInfo, fontSize);
+	DrawFPS(20, 20);
+	DrawText(levelInfo, GetScreenWidth()/2 -txtLen/2, 20, fontSize, RED);
+}
+
+
+Color getEnemyTint(Enemy e) {
+	Color tint = WHITE;	
+	
+	// inverted health percent
+	float healthPercent = 1-(e.health / e.maxHealth);
+
+	tint.r = 255 - (25*healthPercent);
+	tint.g = 255 - (255*healthPercent);
+	tint.b = 255 - (255*healthPercent);
+
+	return tint;	
 }
 
 void gameOver() {
@@ -468,7 +569,7 @@ void drawGameOverScreen() {
 		GetScreenHeight()/2 + 100, fontSizeInfo, RED);
 }
 
-void handleWin() {
+void checkLevelEnd() {
 	bool enemiesAlive = false;
 	for (int i = 0; i < NUM_ENEMIES; i++) {
 		if (enemies[i].isDead == false) {
@@ -476,7 +577,25 @@ void handleWin() {
 		}
 	}
 	if (enemiesAlive == false) {
+		currentLevel++;
 		resetGame();
 	}
 }
 
+void nextLevel() {
+	currentLevel++;
+	resetGame();
+}
+
+
+// simple test level with one enemy
+void testLevel() {
+	for (int i = 0; i < NUM_ENEMIES; i++) {
+		enemies[i].isDead = true;
+	}
+	enemies[0].isDead = false;
+	enemies[0].vSpeed = 0;
+	enemies[0].hSpeed = -10;
+	enemies[0].x = player.x -200;
+	enemies[0].y = player.y;
+}
